@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Claude Agent SDK UI</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Claude Agent SDK UI</h1>
+      <div class="toolbar">
+        <label class="toolbar-field">
+          <span>User</span>
+          <select id="userSelect"></select>
+        </label>
+        <button id="newSessionBtn" type="button">New Session</button>
+        <button id="interruptBtn" type="button">Interrupt</button>
+        <button id="themeToggle" type="button">Theme</button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="sidebar card">
+        <h2>Sessions</h2>
+        <div id="sessionsList" class="sessions"></div>
+      </aside>
+
+      <section class="workspace">
+        <article class="card chat-panel">
+          <h2>Messages</h2>
+          <form id="promptForm" class="prompt-form">
+            <textarea id="promptInput" rows="4" placeholder="Type your prompt..."></textarea>
+            <button type="submit" id="sendBtn">Send</button>
+          </form>
+          <div id="messagesList" class="messages"></div>
+        </article>
+
+        <article class="card logs-panel">
+          <h2>Session Logs</h2>
+          <div id="sessionLogsList" class="logs"></div>
+        </article>
+      </section>
+    </main>
+
+    <template id="messageTemplate">
+      <div class="message-item">
+        <div class="message-head">
+          <span class="message-role"></span>
+          <time class="message-time"></time>
+        </div>
+        <pre class="message-content"></pre>
+      </div>
+    </template>
+
+    <template id="logTemplate">
+      <div class="log-item">
+        <div class="log-head">
+          <span class="log-type"></span>
+          <time class="log-time"></time>
+        </div>
+        <pre class="log-content"></pre>
+      </div>
+    </template>
+
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>

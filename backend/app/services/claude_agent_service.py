@@ -152,83 +152,103 @@ class ClaudeAgentService:
             },
         }
 
-        runtime = await self.runtime_registry.get_or_create(
-            local_session_id=str(session.id),
-            model=session.model,
-            permission_mode=session.permission_mode,
-            max_turns=settings.claude_max_turns,
-            system_prompt=session.system_prompt,
-            resume=session.claude_session_id,
-        )
+        recovery_attempted = False
+        while True:
+            runtime = await self.runtime_registry.get_or_create(
+                local_session_id=str(session.id),
+                model=session.model,
+                permission_mode=session.permission_mode,
+                max_turns=settings.claude_max_turns,
+                system_prompt=session.system_prompt,
+                resume=session.claude_session_id,
+            )
 
-        try:
-            async for sdk_message in runtime.query_stream(prompt):
-                serialized = ClaudeMessageSerializer.serialize(sdk_message)
-                raw_text = ClaudeMessageSerializer.extract_text(serialized)
+            try:
+                async for sdk_message in runtime.query_stream(prompt):
+                    serialized = ClaudeMessageSerializer.serialize(sdk_message)
+                    raw_text = ClaudeMessageSerializer.extract_text(serialized)
 
-                saved = await message_repo.create_message(
-                    session_id=session.id,
-                    role=serialized.get("role", Constants.ROLE_UNKNOWN),
-                    message_type=serialized.get("type", Constants.MESSAGE_TYPE_UNKNOWN),
-                    payload=serialized,
-                    raw_text=raw_text,
-                )
+                    saved = await message_repo.create_message(
+                        session_id=session.id,
+                        role=serialized.get("role", Constants.ROLE_UNKNOWN),
+                        message_type=serialized.get("type", Constants.MESSAGE_TYPE_UNKNOWN),
+                        payload=serialized,
+                        raw_text=raw_text,
+                    )
 
-                result_session_id = serialized.get("session_id")
-                if result_session_id and result_session_id != session.claude_session_id:
-                    await session_repo.update_claude_session_id(session, result_session_id)
-                    runtime.set_resume(result_session_id)
+                    result_session_id = serialized.get("session_id")
+                    if result_session_id and result_session_id != session.claude_session_id:
+                        await session_repo.update_claude_session_id(session, result_session_id)
+                        runtime.set_resume(result_session_id)
 
-                if serialized.get("type") == Constants.MESSAGE_TYPE_RESULT:
+                    if serialized.get("type") == Constants.MESSAGE_TYPE_RESULT:
+                        await log_repo.create_log(
+                            session_id=session.id,
+                            event_type=Constants.SESSION_EVENT_TURN_RESULT,
+                            details={
+                                "session_id": serialized.get("session_id"),
+                                "is_error": serialized.get("is_error", False),
+                                "duration_ms": serialized.get("duration_ms"),
+                                "cost_usd": serialized.get("total_cost_usd"),
+                                "num_turns": serialized.get("num_turns"),
+                            },
+                        )
+
+                    yield {
+                        "event": Constants.STREAM_EVENT_MESSAGE,
+                        "payload": {
+                            "id": str(saved.id),
+                            "session_id": str(saved.session_id),
+                            "role": saved.role,
+                            "message_type": saved.message_type,
+                            "payload": saved.payload,
+                            "raw_text": saved.raw_text,
+                            "created_at": saved.created_at.isoformat(),
+                        },
+                    }
+
+                    if self._contains_ask_user_question(serialized):
+                        await log_repo.create_log(
+                            session_id=session.id,
+                            event_type=Constants.SESSION_EVENT_WAITING_USER_ANSWER,
+                            details={"message_id": str(saved.id)},
+                        )
+                        break
+                return
+            except Exception as exc:
+                if not recovery_attempted and self._is_recoverable_runtime_error(exc):
+                    recovery_attempted = True
+                    previous_claude_session_id = session.claude_session_id
+                    await self.runtime_registry.drop(str(session.id))
+                    if previous_claude_session_id is not None:
+                        await session_repo.update_claude_session_id(session, None)
                     await log_repo.create_log(
                         session_id=session.id,
-                        event_type=Constants.SESSION_EVENT_TURN_RESULT,
+                        event_type=Constants.SESSION_EVENT_RUNTIME_RESET,
                         details={
-                            "session_id": serialized.get("session_id"),
-                            "is_error": serialized.get("is_error", False),
-                            "duration_ms": serialized.get("duration_ms"),
-                            "cost_usd": serialized.get("total_cost_usd"),
-                            "num_turns": serialized.get("num_turns"),
+                            "reason": str(exc),
+                            "previous_claude_session_id": previous_claude_session_id,
+                            "retrying": True,
                         },
                     )
+                    continue
 
+                await session_repo.update_status(session, Constants.SESSION_STATUS_ERROR)
+                error_details = self._build_error_details(exc)
+                error_log = await log_repo.create_log(
+                    session_id=session.id,
+                    event_type=Constants.SESSION_EVENT_SDK_ERROR,
+                    details=error_details,
+                )
                 yield {
-                    "event": Constants.STREAM_EVENT_MESSAGE,
+                    "event": Constants.STREAM_EVENT_ERROR,
                     "payload": {
-                        "id": str(saved.id),
-                        "session_id": str(saved.session_id),
-                        "role": saved.role,
-                        "message_type": saved.message_type,
-                        "payload": saved.payload,
-                        "raw_text": saved.raw_text,
-                        "created_at": saved.created_at.isoformat(),
+                        "message": error_details["message"],
+                        "log_id": str(error_log.id),
+                        "created_at": error_log.created_at.isoformat(),
                     },
                 }
-
-                if self._contains_ask_user_question(serialized):
-                    await log_repo.create_log(
-                        session_id=session.id,
-                        event_type=Constants.SESSION_EVENT_WAITING_USER_ANSWER,
-                        details={"message_id": str(saved.id)},
-                    )
-                    await runtime.interrupt()
-                    break
-        except Exception as exc:
-            await session_repo.update_status(session, Constants.SESSION_STATUS_ERROR)
-            error_details = self._build_error_details(exc)
-            error_log = await log_repo.create_log(
-                session_id=session.id,
-                event_type=Constants.SESSION_EVENT_SDK_ERROR,
-                details=error_details,
-            )
-            yield {
-                "event": Constants.STREAM_EVENT_ERROR,
-                "payload": {
-                    "message": error_details["message"],
-                    "log_id": str(error_log.id),
-                    "created_at": error_log.created_at.isoformat(),
-                },
-            }
+                return
 
     @staticmethod
     def _build_error_details(exc: Exception) -> dict[str, Any]:
@@ -267,3 +287,13 @@ class ClaudeAgentService:
             if item.get("name") == Constants.TOOL_ASK_USER_QUESTION:
                 return True
         return False
+
+    @staticmethod
+    def _is_recoverable_runtime_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        is_initialize_timeout = (
+            Constants.RUNTIME_RETRY_TOKEN_CONTROL_REQUEST_TIMEOUT in message
+            and Constants.RUNTIME_RETRY_TOKEN_INITIALIZE in message
+        )
+        is_process_exit_1 = Constants.RUNTIME_RETRY_TOKEN_EXIT_CODE_1 in message
+        return is_initialize_timeout or is_process_exit_1

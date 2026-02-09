@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator
 from inspect import isawaitable
+from pathlib import Path
 from typing import Any
 
 from app.core import settings
@@ -38,6 +39,7 @@ class ClaudeSessionRuntime:
             last_error: Exception | None = None
 
             for attempt in range(1, max_attempts + 1):
+                self._ensure_claude_config_files()
                 client = ClaudeSDKClient(options=self._build_options())
                 await client.connect()
                 await self._set_active_client(client)
@@ -93,13 +95,13 @@ class ClaudeSessionRuntime:
                 finally:
                     await self._clear_active_client(client)
                     if hasattr(client, "disconnect"):
-                        disconnect_method = getattr(client, "disconnect")
-                        result = disconnect_method()
-                        if asyncio.iscoroutine(result):
-                            try:
+                        try:
+                            disconnect_method = getattr(client, "disconnect")
+                            result = disconnect_method()
+                            if asyncio.iscoroutine(result):
                                 await result
-                            except RuntimeError as exc:
-                                print(f"[runtime] disconnect warning: {exc}", flush=True)
+                        except Exception as exc:
+                            print(f"[runtime] disconnect warning: {exc}", flush=True)
 
             if last_error is not None:
                 raise last_error
@@ -108,14 +110,17 @@ class ClaudeSessionRuntime:
         async with self._active_client_lock:
             client = self._active_client
         if client is not None:
-            await client.interrupt()
+            try:
+                await client.interrupt()
+            except Exception as exc:
+                # Interrupt is best-effort; avoid failing request flow on shutdown races.
+                print(f"[runtime] interrupt warning: {exc}", flush=True)
 
     async def close(self) -> None:
         await self.interrupt()
 
     def set_resume(self, claude_session_id: str | None) -> None:
-        if claude_session_id:
-            self.resume = claude_session_id
+        self.resume = claude_session_id
 
     async def _set_active_client(self, client: ClaudeSDKClient) -> None:
         async with self._active_client_lock:
@@ -152,3 +157,17 @@ class ClaudeSessionRuntime:
         is_control_timeout = Constants.RUNTIME_RETRY_TOKEN_CONTROL_REQUEST_TIMEOUT in message
         is_process_exit_1 = Constants.RUNTIME_RETRY_TOKEN_EXIT_CODE_1 in message
         return is_initialize_timeout or is_control_timeout or is_process_exit_1
+
+    @staticmethod
+    def _ensure_claude_config_files() -> None:
+        claude_config_path = Path.home() / ".claude.json"
+        claude_dir = Path.home() / ".claude"
+        remote_settings_path = claude_dir / "remote-settings.json"
+        try:
+            if not claude_config_path.exists():
+                claude_config_path.write_text("{}\n", encoding="utf-8")
+            claude_dir.mkdir(parents=True, exist_ok=True)
+            if not remote_settings_path.exists():
+                remote_settings_path.write_text("{}\n", encoding="utf-8")
+        except Exception as exc:
+            print(f"[runtime] warning: unable to ensure Claude config files: {exc}", flush=True)

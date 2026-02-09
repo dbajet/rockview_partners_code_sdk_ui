@@ -46,7 +46,7 @@ class SessionRepository:
         result = await self.db.execute(select(AgentSession).where(AgentSession.id == session_id))
         return result.scalar_one_or_none()
 
-    async def update_claude_session_id(self, session: AgentSession, claude_session_id: str) -> None:
+    async def update_claude_session_id(self, session: AgentSession, claude_session_id: str | None) -> None:
         session.claude_session_id = claude_session_id
         await self.db.commit()
 

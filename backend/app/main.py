@@ -29,8 +29,23 @@ runtime_registry = ClaudeRuntimeRegistry()
 service = ClaudeAgentService(runtime_registry)
 
 
+def ensure_claude_config_files() -> None:
+    claude_config_path = Path.home() / ".claude.json"
+    claude_dir = Path.home() / ".claude"
+    remote_settings_path = claude_dir / "remote-settings.json"
+
+    if not claude_config_path.exists():
+        claude_config_path.write_text("{}\n", encoding="utf-8")
+
+    claude_dir.mkdir(parents=True, exist_ok=True)
+    if not remote_settings_path.exists():
+        remote_settings_path.write_text("{}\n", encoding="utf-8")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncGenerator[None, None]:
+    ensure_claude_config_files()
+
     db_manager = get_database_manager()
     await db_manager.wait_until_available()
     await db_manager.create_tables()

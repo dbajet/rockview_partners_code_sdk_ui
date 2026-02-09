@@ -43,6 +43,12 @@ class ClaudeRuntimeRegistry:
             return
         await runtime.interrupt()
 
+    async def drop(self, local_session_id: str) -> None:
+        async with self._lock:
+            runtime = self._runtimes.pop(local_session_id, None)
+        if runtime is not None:
+            await runtime.close()
+
     async def close_all(self) -> None:
         async with self._lock:
             runtimes = list(self._runtimes.values())

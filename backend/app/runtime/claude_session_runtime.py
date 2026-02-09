@@ -5,6 +5,8 @@ from collections.abc import AsyncGenerator
 from inspect import isawaitable
 from typing import Any
 
+from app.core import settings
+from app.core.constants import Constants
 from app.runtime.sdk_types import ClaudeOptions, ClaudeSDKClient
 
 
@@ -26,82 +28,127 @@ class ClaudeSessionRuntime:
         self.allowed_tools = allowed_tools
         self.resume = resume
 
-        self._client_lock = asyncio.Lock()
         self._query_lock = asyncio.Lock()
-        self._client: ClaudeSDKClient | None = None
+        self._active_client_lock = asyncio.Lock()
+        self._active_client: ClaudeSDKClient | None = None
 
     async def query_stream(self, prompt: str) -> AsyncGenerator[Any, None]:
         async with self._query_lock:
-            client = await self._get_client()
+            max_attempts = Constants.RUNTIME_MAX_ATTEMPTS
+            last_error: Exception | None = None
 
-            query_result = client.query(prompt)
-            if hasattr(query_result, "__aiter__"):
-                async for message in query_result:
-                    yield message
-                    if type(message).__name__ == "ResultMessage":
-                        break
-                return
+            for attempt in range(1, max_attempts + 1):
+                client = ClaudeSDKClient(options=self._build_options())
+                await client.connect()
+                await self._set_active_client(client)
+                emitted_count = 0
 
-            if isawaitable(query_result):
-                await query_result
+                try:
+                    query_result = client.query(prompt)
+                    if hasattr(query_result, "__aiter__"):
+                        async for message in query_result:
+                            emitted_count += 1
+                            yield message
+                            if type(message).__name__ == Constants.MESSAGE_TYPE_RESULT:
+                                break
+                        return
 
-            response_reader = client.receive_response()
-            if hasattr(response_reader, "__aiter__"):
-                async for message in response_reader:
-                    yield message
-                    if type(message).__name__ == "ResultMessage":
-                        break
-                return
+                    if isawaitable(query_result):
+                        await query_result
 
-            while True:
-                message = client.receive_response()
-                if isawaitable(message):
-                    message = await message
-                yield message
-                if type(message).__name__ == "ResultMessage":
-                    break
+                    response_reader = client.receive_response()
+                    if hasattr(response_reader, "__aiter__"):
+                        saw_result = False
+                        async for message in response_reader:
+                            emitted_count += 1
+                            yield message
+                            if type(message).__name__ == Constants.MESSAGE_TYPE_RESULT:
+                                saw_result = True
+                                break
+                        if not saw_result:
+                            print("[runtime] warning: stream ended without ResultMessage", flush=True)
+                        return
+
+                    while True:
+                        message = client.receive_response()
+                        if isawaitable(message):
+                            message = await message
+                        emitted_count += 1
+                        yield message
+                        if type(message).__name__ == Constants.MESSAGE_TYPE_RESULT:
+                            break
+                    return
+                except Exception as exc:
+                    last_error = exc
+                    retryable = self._is_retryable_startup_error(exc) and emitted_count == 0
+                    if retryable and attempt < max_attempts:
+                        print(
+                            f"[runtime] transient SDK startup failure (attempt {attempt}/{max_attempts})"
+                            f" type={type(exc).__name__} message={exc}",
+                            flush=True,
+                        )
+                        await asyncio.sleep(Constants.RUNTIME_RETRY_BASE_DELAY_SECONDS * attempt)
+                        continue
+                    raise
+                finally:
+                    await self._clear_active_client(client)
+                    if hasattr(client, "disconnect"):
+                        disconnect_method = getattr(client, "disconnect")
+                        result = disconnect_method()
+                        if asyncio.iscoroutine(result):
+                            try:
+                                await result
+                            except RuntimeError as exc:
+                                print(f"[runtime] disconnect warning: {exc}", flush=True)
+
+            if last_error is not None:
+                raise last_error
 
     async def interrupt(self) -> None:
-        if self._client is not None:
-            await self._client.interrupt()
+        async with self._active_client_lock:
+            client = self._active_client
+        if client is not None:
+            await client.interrupt()
 
     async def close(self) -> None:
-        async with self._client_lock:
-            if self._client is None:
-                return
-            if hasattr(self._client, "disconnect"):
-                disconnect_method = getattr(self._client, "disconnect")
-                result = disconnect_method()
-                if asyncio.iscoroutine(result):
-                    try:
-                        await result
-                    except RuntimeError as exc:
-                        # Some SDK versions bind disconnect scopes to the task that created the query.
-                        # During app reload/shutdown this can run in another task; ignore that shutdown-only error.
-                        print(f"[runtime] disconnect warning: {exc}", flush=True)
-            self._client = None
+        await self.interrupt()
 
     def set_resume(self, claude_session_id: str | None) -> None:
         if claude_session_id:
             self.resume = claude_session_id
 
-    async def _get_client(self) -> ClaudeSDKClient:
-        async with self._client_lock:
-            if self._client is None:
-                options_kwargs: dict[str, Any] = {
-                    "model": self.model,
-                    "permission_mode": self.permission_mode,
-                    "max_turns": self.max_turns,
-                }
-                if self.allowed_tools:
-                    options_kwargs["allowed_tools"] = self.allowed_tools
-                if self.system_prompt:
-                    options_kwargs["system_prompt"] = self.system_prompt
-                if self.resume:
-                    options_kwargs["resume"] = self.resume
+    async def _set_active_client(self, client: ClaudeSDKClient) -> None:
+        async with self._active_client_lock:
+            self._active_client = client
 
-                options = ClaudeOptions(**options_kwargs)
-                self._client = ClaudeSDKClient(options=options)
-                await self._client.connect()
+    async def _clear_active_client(self, client: ClaudeSDKClient) -> None:
+        async with self._active_client_lock:
+            if self._active_client is client:
+                self._active_client = None
 
-            return self._client
+    def _build_options(self) -> ClaudeOptions:
+        options_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "permission_mode": self.permission_mode,
+            "max_turns": self.max_turns,
+        }
+        if self.allowed_tools:
+            options_kwargs["allowed_tools"] = self.allowed_tools
+        if self.system_prompt:
+            options_kwargs["system_prompt"] = self.system_prompt
+        if self.resume:
+            options_kwargs["resume"] = self.resume
+        if settings.claude_debug_stderr:
+            options_kwargs["extra_args"] = {"debug-to-stderr": None}
+        return ClaudeOptions(**options_kwargs)
+
+    @staticmethod
+    def _is_retryable_startup_error(exc: Exception) -> bool:
+        message = str(exc).lower()
+        is_initialize_timeout = (
+            Constants.RUNTIME_RETRY_TOKEN_INITIALIZE in message
+            and Constants.RUNTIME_RETRY_TOKEN_TIMEOUT in message
+        )
+        is_control_timeout = Constants.RUNTIME_RETRY_TOKEN_CONTROL_REQUEST_TIMEOUT in message
+        is_process_exit_1 = Constants.RUNTIME_RETRY_TOKEN_EXIT_CODE_1 in message
+        return is_initialize_timeout or is_control_timeout or is_process_exit_1

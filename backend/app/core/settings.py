@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     claude_permission_mode: PermissionMode = PermissionMode.BYPASS_PERMISSIONS
     claude_system_prompt: Optional[str] = None
     claude_allowed_tools: Optional[list[str]] = None
+    claude_debug_stderr: bool = False
 
     default_users_csv: str = "demo:Demo User,analyst:Analyst User"
 

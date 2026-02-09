@@ -49,3 +49,4 @@ PostgreSQL is exposed on host port `5433` by default (configurable with `DB_HOST
 
 The latest Python docs expose `ClaudeCodeOptions` with the same option set referenced by the docs anchor for Claude agent options.
 This project uses that class and falls back to `ClaudeAgentOptions` for compatibility.
+Set `CLAUDE_DEBUG_STDERR=true` in `.env` when you need verbose Claude CLI stderr diagnostics in container logs.

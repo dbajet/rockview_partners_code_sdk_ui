@@ -29,6 +29,7 @@
       <section class="workspace">
         <article class="card chat-panel">
           <h2>Messages</h2>
+          <div id="responseTimer" class="response-timer">Response: --:--.-</div>
           <form id="promptForm" class="prompt-form">
             <textarea id="promptInput" rows="4" placeholder="Type your prompt..."></textarea>
             <button type="submit" id="sendBtn">Send</button>
@@ -49,7 +50,7 @@
           <span class="message-role"></span>
           <time class="message-time"></time>
         </div>
-        <pre class="message-content"></pre>
+        <div class="message-content"></div>
       </div>
     </template>
 
@@ -62,6 +63,16 @@
         <pre class="log-content"></pre>
       </div>
     </template>
+
+    <div id="askModal" class="ask-modal is-hidden" role="dialog" aria-modal="true" aria-hidden="true">
+      <div class="ask-modal-panel">
+        <div class="ask-modal-head">
+          <h3 class="ask-modal-title">Questions from Claude</h3>
+          <button id="askModalCloseBtn" type="button" class="ask-modal-close">Close</button>
+        </div>
+        <div id="askModalBody" class="ask-modal-body"></div>
+      </div>
+    </div>
 
     <script type="module" src="/static/app.js"></script>
   </body>

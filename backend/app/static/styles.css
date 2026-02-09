@@ -118,6 +118,13 @@ h2 {
   flex-direction: column;
 }
 
+.response-timer {
+  margin: 0.5rem 0 0.7rem;
+  color: var(--muted);
+  font-size: 0.88rem;
+  font-family: var(--font-mono);
+}
+
 .prompt-form {
   margin-bottom: 0.8rem;
   display: grid;
@@ -200,6 +207,158 @@ button {
   word-break: break-word;
   font-family: var(--font-mono);
   font-size: 0.84rem;
+}
+
+.message-content {
+  line-height: 1.35;
+  max-height: calc(10 * 1.35em);
+  overflow: auto;
+}
+
+.ask-user-form {
+  display: grid;
+  gap: 0.75rem;
+  font-family: var(--font-main);
+}
+
+.ask-user-section {
+  border: 1px solid var(--border);
+  border-radius: 0.4rem;
+  padding: 0.5rem;
+  background: color-mix(in srgb, var(--surface-soft) 80%, transparent);
+}
+
+.ask-user-title {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+.ask-user-question {
+  margin: 0 0 0.45rem;
+  font-size: 0.86rem;
+}
+
+.ask-user-options {
+  display: grid;
+  gap: 0.35rem;
+}
+
+.ask-user-option {
+  border: 1px solid var(--border);
+  border-radius: 0.35rem;
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  padding: 0.45rem 0.5rem;
+}
+
+.ask-user-option.selected {
+  border-color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.ask-user-option-label {
+  display: block;
+  font-size: 0.84rem;
+}
+
+.ask-user-option-description {
+  display: block;
+  font-size: 0.75rem;
+  color: var(--muted);
+  margin-top: 0.15rem;
+}
+
+.ask-user-input {
+  width: 100%;
+}
+
+.ask-user-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.ask-user-submit {
+  background: var(--accent);
+  color: var(--accent-contrast);
+  border-color: transparent;
+}
+
+.ask-user-status {
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+
+.ask-user-status.is-error {
+  color: var(--danger);
+}
+
+.ask-modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(7, 12, 18, 0.62);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 20;
+  padding: 1rem;
+}
+
+.ask-modal.is-hidden {
+  display: none;
+}
+
+.ask-modal-panel {
+  width: min(720px, 100%);
+  max-height: min(80vh, 760px);
+  overflow: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 0.85rem;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+}
+
+.ask-modal-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 0.8rem;
+}
+
+.ask-modal-title {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.ask-modal-close {
+  font-size: 0.82rem;
+}
+
+.ask-modal-body {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.ask-modal-request {
+  border: 1px solid var(--border);
+  border-radius: 0.45rem;
+  padding: 0.6rem;
+  background: color-mix(in srgb, var(--surface-soft) 70%, transparent);
+}
+
+.ask-modal-request-title {
+  margin: 0 0 0.45rem;
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .session-meta {

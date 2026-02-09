@@ -133,7 +133,7 @@ async def stream_messages(
 
     async def event_stream() -> AsyncGenerator[str, None]:
         async for item in service.stream_prompt(db, session_id=session_id, prompt=prompt):
-            yield f"data: {json.dumps(item, default=str)}\\n\\n"
+            yield f"data: {json.dumps(item, default=str)}\n\n"
 
     headers = {
         "Cache-Control": "no-cache",

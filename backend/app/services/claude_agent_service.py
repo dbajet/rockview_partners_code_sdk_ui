@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core import settings
+from app.core import Constants, settings
 from app.models import AgentSession, MessageLog, SessionLog, User
 from app.repositories import MessageRepository, SessionLogRepository, SessionRepository, UserRepository
 from app.runtime import ClaudeMessageSerializer, ClaudeRuntimeRegistry, default_permission_mode
@@ -65,7 +66,7 @@ class ClaudeAgentService:
 
         await log_repo.create_log(
             session_id=session.id,
-            event_type="SESSION_CREATED",
+            event_type=Constants.SESSION_EVENT_CREATED,
             details={
                 "title": session.title,
                 "model": session.model,
@@ -106,8 +107,8 @@ class ClaudeAgentService:
         await self.runtime_registry.interrupt(str(session.id))
         await log_repo.create_log(
             session_id=session.id,
-            event_type="SESSION_INTERRUPTED",
-            details={"source": "ui"},
+            event_type=Constants.SESSION_EVENT_INTERRUPTED,
+            details={"source": Constants.SESSION_SOURCE_UI},
         )
 
     async def stream_prompt(
@@ -126,20 +127,20 @@ class ClaudeAgentService:
 
         user_message = await message_repo.create_message(
             session_id=session.id,
-            role="user",
-            message_type="prompt",
+            role=Constants.ROLE_USER,
+            message_type=Constants.MESSAGE_TYPE_PROMPT,
             payload={"prompt": prompt},
             raw_text=prompt,
         )
 
         await log_repo.create_log(
             session_id=session.id,
-            event_type="PROMPT_SUBMITTED",
+            event_type=Constants.SESSION_EVENT_PROMPT_SUBMITTED,
             details={"length": len(prompt)},
         )
 
         yield {
-            "event": "message",
+            "event": Constants.STREAM_EVENT_MESSAGE,
             "payload": {
                 "id": str(user_message.id),
                 "session_id": str(user_message.session_id),
@@ -167,8 +168,8 @@ class ClaudeAgentService:
 
                 saved = await message_repo.create_message(
                     session_id=session.id,
-                    role=serialized.get("role", "unknown"),
-                    message_type=serialized.get("type", "Unknown"),
+                    role=serialized.get("role", Constants.ROLE_UNKNOWN),
+                    message_type=serialized.get("type", Constants.MESSAGE_TYPE_UNKNOWN),
                     payload=serialized,
                     raw_text=raw_text,
                 )
@@ -178,10 +179,10 @@ class ClaudeAgentService:
                     await session_repo.update_claude_session_id(session, result_session_id)
                     runtime.set_resume(result_session_id)
 
-                if serialized.get("type") == "ResultMessage":
+                if serialized.get("type") == Constants.MESSAGE_TYPE_RESULT:
                     await log_repo.create_log(
                         session_id=session.id,
-                        event_type="TURN_RESULT",
+                        event_type=Constants.SESSION_EVENT_TURN_RESULT,
                         details={
                             "session_id": serialized.get("session_id"),
                             "is_error": serialized.get("is_error", False),
@@ -192,7 +193,7 @@ class ClaudeAgentService:
                     )
 
                 yield {
-                    "event": "message",
+                    "event": Constants.STREAM_EVENT_MESSAGE,
                     "payload": {
                         "id": str(saved.id),
                         "session_id": str(saved.session_id),
@@ -203,18 +204,66 @@ class ClaudeAgentService:
                         "created_at": saved.created_at.isoformat(),
                     },
                 }
+
+                if self._contains_ask_user_question(serialized):
+                    await log_repo.create_log(
+                        session_id=session.id,
+                        event_type=Constants.SESSION_EVENT_WAITING_USER_ANSWER,
+                        details={"message_id": str(saved.id)},
+                    )
+                    await runtime.interrupt()
+                    break
         except Exception as exc:
-            await session_repo.update_status(session, "error")
+            await session_repo.update_status(session, Constants.SESSION_STATUS_ERROR)
+            error_details = self._build_error_details(exc)
             error_log = await log_repo.create_log(
                 session_id=session.id,
-                event_type="SDK_ERROR",
-                details={"message": str(exc)},
+                event_type=Constants.SESSION_EVENT_SDK_ERROR,
+                details=error_details,
             )
             yield {
-                "event": "error",
+                "event": Constants.STREAM_EVENT_ERROR,
                 "payload": {
-                    "message": str(exc),
+                    "message": error_details["message"],
                     "log_id": str(error_log.id),
                     "created_at": error_log.created_at.isoformat(),
                 },
             }
+
+    @staticmethod
+    def _build_error_details(exc: Exception) -> dict[str, Any]:
+        details: dict[str, Any] = {
+            "message": str(exc),
+            "exception_type": type(exc).__name__,
+        }
+
+        exit_code = getattr(exc, "exit_code", None)
+        if exit_code is not None:
+            details["exit_code"] = exit_code
+
+        stderr_output = getattr(exc, "stderr", None)
+        if stderr_output:
+            details["stderr"] = stderr_output
+
+        cause = getattr(exc, "__cause__", None)
+        if cause is not None:
+            details["cause_type"] = type(cause).__name__
+            details["cause_message"] = str(cause)
+
+        return details
+
+    @staticmethod
+    def _contains_ask_user_question(serialized_message: dict[str, Any]) -> bool:
+        if serialized_message.get("type") != Constants.MESSAGE_TYPE_ASSISTANT:
+            return False
+
+        content = serialized_message.get("content")
+        if not isinstance(content, list):
+            return False
+
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("name") == Constants.TOOL_ASK_USER_QUESTION:
+                return True
+        return False

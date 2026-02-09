@@ -10,6 +10,8 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends nodejs npm ca-certificates \
     && npm install -g @anthropic-ai/claude-code \
     && useradd --create-home --home-dir /home/appuser --shell /bin/bash appuser \
+    && mkdir -p /home/appuser/.claude \
+    && printf '{}\n' > /home/appuser/.claude/remote-settings.json \
     && chown -R appuser:appuser /home/appuser /app \
     && rm -rf /var/lib/apt/lists/*
 

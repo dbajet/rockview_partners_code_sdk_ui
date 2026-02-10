@@ -1,0 +1,311 @@
+from __future__ import annotations
+
+from collections.abc import AsyncGenerator
+from typing import Any
+from uuid import UUID
+
+from fastapi import HTTPException
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.backend.core.constants import Constants
+from app.backend.core.settings import Settings
+from app.backend.models import AgentSession, MessageLog, SessionLog, User
+from app.backend.repositories import MessageRepository, SessionLogRepository, SessionRepository, UserRepository
+from app.backend.claude_sdk import ClaudeMessageSerializer, ClaudeRuntimeRegistry, DefaultPermissionModeResolver
+from app.backend.schemas import SessionCreate, UserCreate
+
+
+class ClaudeAgentService:
+    def __init__(
+        self,
+        runtime_registry: ClaudeRuntimeRegistry,
+        settings: Settings,
+        permission_mode_resolver: DefaultPermissionModeResolver,
+    ) -> None:
+        self._runtime_registry = runtime_registry
+        self._settings = settings
+        self._permission_mode_resolver = permission_mode_resolver
+
+    async def ensure_default_users(self, db: AsyncSession) -> None:
+        user_repo = UserRepository(db)
+        existing_users = await user_repo.list_users()
+        if existing_users:
+            return
+
+        for item in self._settings.default_users_csv.split(","):
+            if ":" not in item:
+                continue
+            username, display_name = [part.strip() for part in item.split(":", 1)]
+            if not username or not display_name:
+                continue
+            await user_repo.create_user(username=username, display_name=display_name)
+
+    async def list_users(self, db: AsyncSession) -> list[User]:
+        user_repo = UserRepository(db)
+        result = list(await user_repo.list_users())
+        return result
+
+    async def create_user(self, db: AsyncSession, payload: UserCreate) -> User:
+        user_repo = UserRepository(db)
+        existing = await user_repo.get_user_by_username(payload.username)
+        if existing:
+            raise HTTPException(status_code=409, detail="Username already exists")
+        result = await user_repo.create_user(username=payload.username, display_name=payload.display_name)
+        return result
+
+    async def create_session(self, db: AsyncSession, payload: SessionCreate) -> AgentSession:
+        user_repo = UserRepository(db)
+        session_repo = SessionRepository(db)
+        log_repo = SessionLogRepository(db)
+
+        user = await user_repo.get_user(payload.user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        title = payload.title or "New Session"
+        model = payload.model or self._settings.claude_model
+        permission_mode = payload.permission_mode or self._permission_mode_resolver.resolve()
+
+        session = await session_repo.create_session(
+            user_id=payload.user_id,
+            title=title,
+            model=model,
+            permission_mode=permission_mode,
+            system_prompt=(
+                payload.system_prompt
+                if payload.system_prompt is not None
+                else self._settings.claude_system_prompt
+            ),
+        )
+
+        await log_repo.create_log(
+            session_id=session.id,
+            event_type=Constants.SESSION_EVENT_CREATED,
+            details={
+                "title": session.title,
+                "model": session.model,
+                "permission_mode": session.permission_mode,
+            },
+        )
+        return session
+
+    async def list_sessions(self, db: AsyncSession, user_id: UUID) -> list[AgentSession]:
+        user_repo = UserRepository(db)
+        user = await user_repo.get_user(user_id)
+        if user is None:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        session_repo = SessionRepository(db)
+        result = list(await session_repo.list_for_user(user_id))
+        return result
+
+    async def get_session(self, db: AsyncSession, session_id: UUID) -> AgentSession:
+        session_repo = SessionRepository(db)
+        session = await session_repo.get_session(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail="Session not found")
+        return session
+
+    async def list_messages(self, db: AsyncSession, session_id: UUID) -> list[MessageLog]:
+        await self.get_session(db, session_id)
+        message_repo = MessageRepository(db)
+        result = list(await message_repo.list_messages(session_id))
+        return result
+
+    async def list_logs(self, db: AsyncSession, session_id: UUID) -> list[SessionLog]:
+        await self.get_session(db, session_id)
+        log_repo = SessionLogRepository(db)
+        result = list(await log_repo.list_logs(session_id))
+        return result
+
+    async def interrupt_session(self, db: AsyncSession, session_id: UUID) -> None:
+        session = await self.get_session(db, session_id)
+        log_repo = SessionLogRepository(db)
+        await self._runtime_registry.interrupt(str(session.id))
+        await log_repo.create_log(
+            session_id=session.id,
+            event_type=Constants.SESSION_EVENT_INTERRUPTED,
+            details={"source": Constants.SESSION_SOURCE_UI},
+        )
+
+    async def stream_prompt(
+        self,
+        db: AsyncSession,
+        *,
+        session_id: UUID,
+        prompt: str,
+    ) -> AsyncGenerator[dict[str, Any], None]:
+        session_repo = SessionRepository(db)
+        message_repo = MessageRepository(db)
+        log_repo = SessionLogRepository(db)
+
+        session = await self.get_session(db, session_id)
+        await session_repo.touch_session(session)
+
+        user_message = await message_repo.create_message(
+            session_id=session.id,
+            role=Constants.ROLE_USER,
+            message_type=Constants.MESSAGE_TYPE_PROMPT,
+            payload={"prompt": prompt},
+            raw_text=prompt,
+        )
+
+        await log_repo.create_log(
+            session_id=session.id,
+            event_type=Constants.SESSION_EVENT_PROMPT_SUBMITTED,
+            details={"length": len(prompt)},
+        )
+
+        yield self._build_message_event(user_message)
+
+        recovery_attempted = False
+        while True:
+            runtime = await self._runtime_registry.get_or_create(
+                local_session_id=str(session.id),
+                model=session.model,
+                permission_mode=session.permission_mode,
+                max_turns=self._settings.claude_max_turns,
+                system_prompt=session.system_prompt,
+                resume=session.claude_session_id,
+            )
+
+            try:
+                async for sdk_message in runtime.query_stream(prompt):
+                    serialized = ClaudeMessageSerializer.serialize(sdk_message)
+                    raw_text = ClaudeMessageSerializer.extract_text(serialized)
+
+                    saved = await message_repo.create_message(
+                        session_id=session.id,
+                        role=serialized.get("role", Constants.ROLE_UNKNOWN),
+                        message_type=serialized.get("type", Constants.MESSAGE_TYPE_UNKNOWN),
+                        payload=serialized,
+                        raw_text=raw_text,
+                    )
+
+                    result_session_id = serialized.get("session_id")
+                    if result_session_id and result_session_id != session.claude_session_id:
+                        await session_repo.update_claude_session_id(session, result_session_id)
+                        runtime.set_resume(result_session_id)
+
+                    if serialized.get("type") == Constants.MESSAGE_TYPE_RESULT:
+                        await log_repo.create_log(
+                            session_id=session.id,
+                            event_type=Constants.SESSION_EVENT_TURN_RESULT,
+                            details={
+                                "session_id": serialized.get("session_id"),
+                                "is_error": serialized.get("is_error", False),
+                                "duration_ms": serialized.get("duration_ms"),
+                                "cost_usd": serialized.get("total_cost_usd"),
+                                "num_turns": serialized.get("num_turns"),
+                            },
+                        )
+
+                    yield self._build_message_event(saved)
+
+                    if self._contains_ask_user_question(serialized):
+                        await log_repo.create_log(
+                            session_id=session.id,
+                            event_type=Constants.SESSION_EVENT_WAITING_USER_ANSWER,
+                            details={"message_id": str(saved.id)},
+                        )
+                        break
+                return
+            except Exception as exc:
+                if not recovery_attempted and self._is_recoverable_runtime_error(exc):
+                    recovery_attempted = True
+                    previous_claude_session_id = session.claude_session_id
+                    await self._runtime_registry.drop(str(session.id))
+                    if previous_claude_session_id is not None:
+                        await session_repo.update_claude_session_id(session, None)
+                    await log_repo.create_log(
+                        session_id=session.id,
+                        event_type=Constants.SESSION_EVENT_RUNTIME_RESET,
+                        details={
+                            "reason": str(exc),
+                            "previous_claude_session_id": previous_claude_session_id,
+                            "retrying": True,
+                        },
+                    )
+                    continue
+
+                await session_repo.update_status(session, Constants.SESSION_STATUS_ERROR)
+                error_details = self._build_error_details(exc)
+                error_log = await log_repo.create_log(
+                    session_id=session.id,
+                    event_type=Constants.SESSION_EVENT_SDK_ERROR,
+                    details=error_details,
+                )
+                yield {
+                    "event": Constants.STREAM_EVENT_ERROR,
+                    "payload": {
+                        "message": error_details["message"],
+                        "log_id": str(error_log.id),
+                        "created_at": error_log.created_at.isoformat(),
+                    },
+                }
+                return
+
+    @classmethod
+    def _build_message_event(cls, message: MessageLog) -> dict[str, Any]:
+        result = {
+            "event": Constants.STREAM_EVENT_MESSAGE,
+            "payload": {
+                "id": str(message.id),
+                "session_id": str(message.session_id),
+                "role": message.role,
+                "message_type": message.message_type,
+                "payload": message.payload,
+                "raw_text": message.raw_text,
+                "created_at": message.created_at.isoformat(),
+            },
+        }
+        return result
+
+    @classmethod
+    def _build_error_details(cls, exc: Exception) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "message": str(exc),
+            "exception_type": type(exc).__name__,
+        }
+
+        exit_code = getattr(exc, "exit_code", None)
+        if exit_code is not None:
+            result["exit_code"] = exit_code
+
+        stderr_output = getattr(exc, "stderr", None)
+        if stderr_output:
+            result["stderr"] = stderr_output
+
+        cause = getattr(exc, "__cause__", None)
+        if cause is not None:
+            result["cause_type"] = type(cause).__name__
+            result["cause_message"] = str(cause)
+
+        return result
+
+    @classmethod
+    def _contains_ask_user_question(cls, serialized_message: dict[str, Any]) -> bool:
+        if serialized_message.get("type") != Constants.MESSAGE_TYPE_ASSISTANT:
+            return False
+
+        content = serialized_message.get("content")
+        if not isinstance(content, list):
+            return False
+
+        for item in content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("name") == Constants.TOOL_ASK_USER_QUESTION:
+                return True
+        return False
+
+    @classmethod
+    def _is_recoverable_runtime_error(cls, exc: Exception) -> bool:
+        message = str(exc).lower()
+        is_initialize_timeout = (
+            Constants.RUNTIME_RETRY_TOKEN_CONTROL_REQUEST_TIMEOUT in message
+            and Constants.RUNTIME_RETRY_TOKEN_INITIALIZE in message
+        )
+        is_process_exit_1 = Constants.RUNTIME_RETRY_TOKEN_EXIT_CODE_1 in message
+        result = is_initialize_timeout or is_process_exit_1
+        return result

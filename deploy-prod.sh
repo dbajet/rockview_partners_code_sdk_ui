@@ -5,8 +5,9 @@
 
 set -euo pipefail
 
-ENV_FILE="${ENV_FILE:-.env.production}"
-COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.yml}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${ENV_FILE:-$SCRIPT_DIR/docker/.env}"
+COMPOSE_FILE="${COMPOSE_FILE:-$SCRIPT_DIR/docker/docker-compose.yml}"
 APP_SERVICE="${APP_SERVICE:-api}"
 DB_SERVICE="${DB_SERVICE:-db}"
 APP_INTERNAL_PORT="${APP_INTERNAL_PORT:-8000}"

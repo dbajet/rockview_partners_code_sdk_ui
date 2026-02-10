@@ -18,35 +18,36 @@ Dockerized UI stack to drive Claude Agent SDK sessions with:
 
 ## Project structure
 
-- `docker-compose.yml`
-- `backend/Dockerfile`
-- `backend/app/main.py`
-- `backend/app/core/`
-- `backend/app/models/`
-- `backend/app/repositories/`
-- `backend/app/runtime/`
-- `backend/app/schemas/`
-- `backend/app/services/`
-- `backend/app/static/`
+- `docker/docker-compose.yml`
+- `docker/Dockerfile`
+- `docker/.env.example`
+- `app/backend/main.py`
+- `app/backend/core/`
+- `app/backend/models/`
+- `app/backend/repositories/`
+- `app/backend/schemas/`
+- `app/backend/services/`
+- `app/backend/claude_sdk/`
+- `app/frontend/static/`
 
 ## Prerequisites
 
-1. Set `ANTHROPIC_API_KEY` in `.env`.
+1. Set `ANTHROPIC_API_KEY` in `docker/.env`.
 2. Claude Code CLI is installed in the API container (`@anthropic-ai/claude-code`).
 
 ## Run
 
 ```bash
-cp .env.example .env
-docker compose up --build
+cp docker/.env.example docker/.env
+docker compose --env-file docker/.env -f docker/docker-compose.yml up --build
 ```
 
 Open: `http://localhost:8070`
 
-PostgreSQL is exposed on host port `5433` by default (configurable with `DB_HOST_PORT`).
+PostgreSQL host port is configurable with `DB_HOST_PORT` in `docker/.env`.
 
 ## Notes on SDK options class
 
 The latest Python docs expose `ClaudeCodeOptions` with the same option set referenced by the docs anchor for Claude agent options.
 This project uses that class and falls back to `ClaudeAgentOptions` for compatibility.
-Set `CLAUDE_DEBUG_STDERR=true` in `.env` when you need verbose Claude CLI stderr diagnostics in container logs.
+Set `CLAUDE_DEBUG_STDERR=true` in `docker/.env` when you need verbose Claude CLI stderr diagnostics in container logs.
